@@ -1,4 +1,3 @@
-// index.js - Упрощенная версия без роутеров
 const express = require('express');
 const cors = require('cors');
 
@@ -6,40 +5,73 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
-// Проверяем обязательные переменные
 if (!TELEGRAM_BOT_TOKEN) {
-  console.error('❌ ERROR: TELEGRAM_BOT_TOKEN is required');
+  console.error('ERROR: TELEGRAM_BOT_TOKEN is required');
   process.exit(1);
 }
 
-console.log('🚀 Server starting...');
-console.log('📍 Port:', PORT);
-console.log('🔧 Environment:', process.env.NODE_ENV || 'development');
+console.log('Server starting on port:', PORT);
 
-// ==================== CORS ====================
 app.use(cors({
   origin: true,
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
-// ==================== MIDDLEWARE ====================
+app.options('*', cors());
 app.use(express.json());
 
-// ==================== ПРОСТЫЕ РОУТЫ ====================
 app.get('/', (req, res) => {
   res.json({ 
-    message: '🎮 Quantum 3D Tic-Tac-Toe Backend is running!',
-    status: 'OK',
-    timestamp: new Date().toISOString()
+    message: 'Quantum 3D Tic-Tac-Toe Backend is running!',
+    status: 'OK'
   });
 });
 
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString()
+    uptime: process.uptime()
   });
+});
+
+app.get('/api/test', (req, res) => {
+  res.json({ 
+    success: true,
+    message: 'Backend is connected!'
+  });
+});
+
+app.post('/api/auth', (req, res) => {
+  try {
+    const { initData } = req.body;
+    
+    if (!initData) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'initData is required' 
+      });
+    }
+    
+    res.json({
+      success: true,
+      user: {
+        id: Math.floor(Math.random() * 1000000000),
+        first_name: 'Telegram',
+        last_name: 'User',
+        username: 'tg_user',
+        language_code: 'ru'
+      }
+    });
+    
+  } catch (error) {
+    console.error('Auth error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Internal server error' 
+    });
+  }
 });
 
 app.post('/auth', (req, res) => {
@@ -47,36 +79,66 @@ app.post('/auth', (req, res) => {
     const { initData } = req.body;
     
     if (!initData) {
-      return res.status(400).json({ error: 'initData is required' });
+      return res.status(400).json({ 
+        success: false,
+        error: 'initData is required' 
+      });
     }
-    
-    console.log('🔐 Auth attempt received');
     
     res.json({
       success: true,
       user: {
-        id: 123456789,
-        first_name: 'Test',
-        last_name: 'User', 
-        username: 'testuser'
+        id: Math.floor(Math.random() * 1000000000),
+        first_name: 'Telegram',
+        last_name: 'User',
+        username: 'tg_user_old',
+        language_code: 'ru'
       }
     });
     
   } catch (error) {
     console.error('Auth error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ 
+      success: false,
+      error: 'Internal server error' 
+    });
   }
 });
 
-// ==================== ЗАГЛУШКИ ЛОББИ ====================
+app.get('/api/lobbies', (req, res) => {
+  res.json({
+    success: true,
+    lobbies: [
+      {
+        id: 'lobby-1',
+        name: 'Test Lobby',
+        players: 1,
+        maxPlayers: 2,
+        status: 'waiting'
+      }
+    ]
+  });
+});
+
 app.get('/lobby/list', (req, res) => {
-  res.json({ lobbies: [] });
+  res.json({
+    success: true,
+    lobbies: [
+      {
+        id: 'lobby-2',
+        name: 'Old Lobby',
+        players: 1,
+        maxPlayers: 2,
+        status: 'waiting'
+      }
+    ]
+  });
 });
 
 app.post('/lobby/create', (req, res) => {
   res.json({ 
     success: true, 
-    lobbyId: 'temp-lobby',
+    lobbyId: 'temp-lobby-' + Date.now(),
     message: 'Lobby created successfully'
   });
 });
@@ -89,19 +151,15 @@ app.post('/lobby/join', (req, res) => {
   });
 });
 
-// ==================== ERROR HANDLING ====================
 app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found' });
 });
 
-// ==================== SERVER START ====================
 const server = app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
+  console.log('Server running on port', PORT);
 });
 
-// ==================== GRACEFUL SHUTDOWN ====================
 process.on('SIGINT', () => {
-  console.log('\n🛑 Shutting down gracefully...');
   server.close(() => {
     process.exit(0);
   });
