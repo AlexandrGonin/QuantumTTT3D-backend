@@ -1,12 +1,12 @@
+// index.js - Упрощенная версия без роутеров
 const express = require('express');
 const cors = require('cors');
-const { WebSocketServer } = require('ws');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
-// Проверяем обязательные переменные окружения
+// Проверяем обязательные переменные
 if (!TELEGRAM_BOT_TOKEN) {
   console.error('❌ ERROR: TELEGRAM_BOT_TOKEN is required');
   process.exit(1);
@@ -16,22 +16,16 @@ console.log('🚀 Server starting...');
 console.log('📍 Port:', PORT);
 console.log('🔧 Environment:', process.env.NODE_ENV || 'development');
 
-// ==================== CORS НАСТРОЙКА ====================
+// ==================== CORS ====================
 app.use(cors({
-  origin: true, // Разрешаем все домены для тестирования
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  origin: true,
+  credentials: true
 }));
-
-// Обработка preflight OPTIONS запросов
-app.options('*', cors());
 
 // ==================== MIDDLEWARE ====================
 app.use(express.json());
-app.use(express.static('public'));
 
-// ==================== БАЗОВЫЕ РОУТЫ ====================
+// ==================== ПРОСТЫЕ РОУТЫ ====================
 app.get('/', (req, res) => {
   res.json({ 
     message: '🎮 Quantum 3D Tic-Tac-Toe Backend is running!',
@@ -48,7 +42,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// ==================== АУТЕНТИФИКАЦИЯ ====================
 app.post('/auth', (req, res) => {
   try {
     const { initData } = req.body;
@@ -59,15 +52,13 @@ app.post('/auth', (req, res) => {
     
     console.log('🔐 Auth attempt received');
     
-    // Заглушка для тестирования
     res.json({
       success: true,
       user: {
         id: 123456789,
         first_name: 'Test',
         last_name: 'User', 
-        username: 'testuser',
-        language_code: 'en'
+        username: 'testuser'
       }
     });
     
@@ -77,7 +68,7 @@ app.post('/auth', (req, res) => {
   }
 });
 
-// ==================== ЛОББИ (УПРОЩЕННЫЕ РОУТЫ) ====================
+// ==================== ЗАГЛУШКИ ЛОББИ ====================
 app.get('/lobby/list', (req, res) => {
   res.json({ lobbies: [] });
 });
@@ -85,58 +76,30 @@ app.get('/lobby/list', (req, res) => {
 app.post('/lobby/create', (req, res) => {
   res.json({ 
     success: true, 
-    lobbyId: 'temp-lobby-' + Date.now(),
+    lobbyId: 'temp-lobby',
     message: 'Lobby created successfully'
   });
 });
 
-// ИСПРАВЛЕННЫЙ РОУТ - без параметров в URL
 app.post('/lobby/join', (req, res) => {
-  const { lobbyId } = req.body;
   res.json({ 
     success: true, 
-    lobbyId: lobbyId || 'default-lobby',
+    lobbyId: 'joined-lobby',
     message: 'Joined lobby successfully'
   });
 });
 
-// ==================== WEB SOCKET СЕРВЕР ====================
-const server = app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
-});
-
-const wss = new WebSocketServer({ server });
-
-wss.on('connection', (ws, request) => {
-  console.log('🔌 New WebSocket client connected');
-  
-  ws.on('message', (message) => {
-    try {
-      const data = JSON.parse(message.toString());
-      console.log('📨 Received:', data);
-      
-      ws.send(JSON.stringify({
-        type: 'ack',
-        message: 'Received',
-        data: data
-      }));
-      
-    } catch (error) {
-      console.error('❌ WebSocket message error:', error);
-    }
-  });
-});
-
 // ==================== ERROR HANDLING ====================
-app.use((err, req, res, next) => {
-  console.error('❌ Error:', err.message);
-  res.status(500).json({ error: 'Internal server error' });
-});
-
 app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found' });
 });
 
+// ==================== SERVER START ====================
+const server = app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+});
+
+// ==================== GRACEFUL SHUTDOWN ====================
 process.on('SIGINT', () => {
   console.log('\n🛑 Shutting down gracefully...');
   server.close(() => {
