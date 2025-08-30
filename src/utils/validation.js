@@ -5,16 +5,12 @@ function validateTelegramData(initDataRaw, botToken) {
         const initData = new URLSearchParams(initDataRaw);
         const hash = initData.get('hash');
         
-        if (!hash) {
-            console.log('No hash in initData');
-            return false;
-        }
+        if (!hash) return false;
 
         const receivedTimestamp = parseInt(initData.get('auth_date'));
         const currentTimestamp = Math.floor(Date.now() / 1000);
         
         if (currentTimestamp - receivedTimestamp > 3600) {
-            console.log('InitData expired');
             return false;
         }
 
@@ -33,12 +29,9 @@ function validateTelegramData(initDataRaw, botToken) {
             .update(dataCheckString)
             .digest('hex');
 
-        const isValid = calculatedHash === hash;
-        console.log('Validation result:', isValid);
-        return isValid;
+        return calculatedHash === hash;
         
     } catch (error) {
-        console.error('Validation error:', error);
         return false;
     }
 }

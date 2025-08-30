@@ -11,51 +11,36 @@ if (!TELEGRAM_BOT_TOKEN) {
     process.exit(1);
 }
 
-console.log('Server starting on port:', PORT);
-
 app.use(cors({ origin: true }));
 app.use(express.json());
 
-app.get('/', (req, res) => {
-    res.json({ message: 'Quantum 3D Tic-Tac-Toe Backend is running!' });
+app.use((req, res, next) => {
+    if (req.url.includes('//')) {
+        req.url = req.url.replace(/\/+/g, '/');
+    }
+    next();
 });
 
-app.get('/health', (req, res) => {
-    res.json({ status: 'healthy' });
+app.get('/', (req, res) => {
+    res.json({ message: 'Server is running!' });
 });
 
 app.post('/auth', (req, res) => {
     try {
-        console.log('Auth request received');
         const { initData } = req.body;
         
         if (!initData) {
-            return res.status(400).json({ 
-                success: false,
-                error: 'initData is required' 
-            });
+            return res.status(400).json({ error: 'initData is required' });
         }
 
         const isValid = validateTelegramData(initData, TELEGRAM_BOT_TOKEN);
         
         if (!isValid) {
-            return res.status(401).json({ 
-                success: false,
-                error: 'Invalid Telegram authentication data' 
-            });
+            return res.status(401).json({ error: 'Invalid Telegram data' });
         }
 
         const urlParams = new URLSearchParams(initData);
-        const userDataStr = urlParams.get('user');
-        
-        if (!userDataStr) {
-            return res.status(400).json({ 
-                success: false,
-                error: 'User data not found in initData' 
-            });
-        }
-
-        const userData = JSON.parse(userDataStr);
+        const userData = JSON.parse(urlParams.get('user'));
         
         res.json({
             success: true,
@@ -64,77 +49,48 @@ app.post('/auth', (req, res) => {
                 first_name: userData.first_name,
                 last_name: userData.last_name || '',
                 username: userData.username || '',
-                language_code: userData.language_code || 'en',
-                is_premium: userData.is_premium || false
+                language_code: userData.language_code || 'en'
             }
         });
         
     } catch (error) {
         console.error('Auth error:', error);
-        res.status(500).json({ 
-            success: false,
-            error: 'Internal server error' 
-        });
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
 app.post('/api/auth', (req, res) => {
-    console.log('API auth request');
-    handleAuth(req, res);
-});
-
-function handleAuth(req, res) {
     try {
         const { initData } = req.body;
         
         if (!initData) {
             return res.status(400).json({ error: 'initData is required' });
         }
+
+        const isValid = validateTelegramData(initData, TELEGRAM_BOT_TOKEN);
+        
+        if (!isValid) {
+            return res.status(401).json({ error: 'Invalid Telegram data' });
+        }
+
+        const urlParams = new URLSearchParams(initData);
+        const userData = JSON.parse(urlParams.get('user'));
         
         res.json({
             success: true,
             user: {
-                id: Math.floor(Math.random() * 1000000000),
-                first_name: 'User',
-                last_name: 'Test',
-                username: 'testuser'
+                id: userData.id,
+                first_name: userData.first_name,
+                last_name: userData.last_name || '',
+                username: userData.username || '',
+                language_code: userData.language_code || 'en'
             }
         });
         
     } catch (error) {
+        console.error('Auth error:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
-}
-
-app.get('/lobby/list', (req, res) => {
-    res.json({
-        success: true,
-        lobbies: []
-    });
-});
-
-app.post('/lobby/create', (req, res) => {
-    res.json({ 
-        success: true, 
-        lobbyId: 'lobby-' + Date.now()
-    });
-});
-
-app.post('/lobby/join', (req, res) => {
-    res.json({ 
-        success: true, 
-        lobbyId: 'joined-lobby'
-    });
-});
-
-app.use((req, res, next) => {
-    console.log('Request:', req.method, req.url);
-    next();
-});
-
-app.use((req, res) => {
-    console.log('404 Not Found:', req.method, req.url);
-    res.status(404).json({ error: 'Endpoint not found' });
 });
 
 app.listen(PORT, () => {
