@@ -27,7 +27,58 @@ app.get('/api/test', (req, res) => {
   res.json({ success: true, message: 'Test endpoint' });
 });
 
+// ВСЕ возможные эндпоинты аутентификации
 app.post('/auth', (req, res) => {
+  handleAuth(req, res);
+});
+
+app.post('/api/auth', (req, res) => {
+  handleAuth(req, res);
+});
+
+app.post('/api/v1/auth', (req, res) => {
+  handleAuth(req, res);
+});
+
+app.post('/auth/telegram', (req, res) => {
+  handleAuth(req, res);
+});
+
+app.post('/api/auth/telegram', (req, res) => {
+  handleAuth(req, res);
+});
+
+// ВСЕ возможные эндпоинты лобби
+app.get('/lobby/list', (req, res) => {
+  handleLobbyList(req, res);
+});
+
+app.get('/api/lobby/list', (req, res) => {
+  handleLobbyList(req, res);
+});
+
+app.get('/api/lobbies', (req, res) => {
+  handleLobbyList(req, res);
+});
+
+app.post('/lobby/create', (req, res) => {
+  handleLobbyCreate(req, res);
+});
+
+app.post('/api/lobby/create', (req, res) => {
+  handleLobbyCreate(req, res);
+});
+
+app.post('/lobby/join', (req, res) => {
+  handleLobbyJoin(req, res);
+});
+
+app.post('/api/lobby/join', (req, res) => {
+  handleLobbyJoin(req, res);
+});
+
+// Функции обработчики
+function handleAuth(req, res) {
   try {
     const { initData } = req.body;
     
@@ -40,16 +91,54 @@ app.post('/auth', (req, res) => {
       user: {
         id: 123456789,
         first_name: 'Test',
-        last_name: 'User'
+        last_name: 'User',
+        username: 'testuser'
       }
     });
     
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });
   }
+}
+
+function handleLobbyList(req, res) {
+  res.json({
+    success: true,
+    lobbies: [
+      {
+        id: 'lobby-1',
+        name: 'Test Lobby',
+        players: 1,
+        maxPlayers: 2
+      }
+    ]
+  });
+}
+
+function handleLobbyCreate(req, res) {
+  res.json({ 
+    success: true, 
+    lobbyId: 'lobby-' + Date.now(),
+    message: 'Lobby created'
+  });
+}
+
+function handleLobbyJoin(req, res) {
+  res.json({ 
+    success: true, 
+    lobbyId: 'joined-lobby',
+    message: 'Joined lobby'
+  });
+}
+
+// Лог всех запросов для отладки
+app.use((req, res, next) => {
+  console.log('Request:', req.method, req.url);
+  next();
 });
 
 app.use((req, res) => {
+  console.log('404 Not Found:', req.method, req.url);
   res.status(404).json({ error: 'Endpoint not found' });
 });
 
