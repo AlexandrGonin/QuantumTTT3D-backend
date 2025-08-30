@@ -18,26 +18,13 @@ console.log('🔧 Environment:', process.env.NODE_ENV || 'development');
 
 // CORS middleware
 app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    
-    const allowedPatterns = [
-      'quantumttt3d-frontend.vercel.app',
-    ];
-
-    const isAllowed = allowedPatterns.some(pattern => pattern.test(origin));
-    
-    if (isAllowed) {
-      callback(null, true);
-    } else {
-      console.log('CORS blocked:', origin);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: true, // ← Разрешаем ВСЕ домены
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
+
+app.options('*', cors());
 
 // Middleware
 app.use(express.json());
