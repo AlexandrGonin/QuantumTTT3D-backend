@@ -22,12 +22,7 @@ app.use(cors({
     if (!origin) return callback(null, true);
     
     const allowedPatterns = [
-      /localhost:\d+$/,
-      /127\.0\.0\.1:\d+$/,
-      /\.railway\.app$/,
-      /\.vercel\.app$/,
-      /\.netlify\.app$/,
-      /\.onrender\.app$/
+      'quantumttt3d-frontend.vercel.app',
     ];
 
     const isAllowed = allowedPatterns.some(pattern => pattern.test(origin));
