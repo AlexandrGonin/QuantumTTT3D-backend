@@ -78,25 +78,40 @@ app.post('/auth/telegram', (req, res) => {
 });
 
 // Функция обработки аутентификации
-function handleAuth(req, res) {
+const { validateTelegramData } = require('./src/utils/validation');
+
+async function handleAuth(req, res) {
   try {
     const { initData } = req.body;
     
     if (!initData) {
       return res.status(400).json({ error: 'initData is required' });
     }
+
+    // Проверяем данные Telegram
+    const isValid = validateTelegramData(initData, TELEGRAM_BOT_TOKEN);
+    
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid Telegram data' });
+    }
+
+    // Парсим данные пользователя
+    const urlParams = new URLSearchParams(initData);
+    const userData = JSON.parse(urlParams.get('user'));
     
     res.json({
       success: true,
       user: {
-        id: Math.floor(Math.random() * 1000000000),
-        first_name: 'User',
-        last_name: 'Test',
-        username: 'testuser'
+        id: userData.id,
+        first_name: userData.first_name,
+        last_name: userData.last_name || '',
+        username: userData.username || '',
+        language_code: userData.language_code || 'en'
       }
     });
     
   } catch (error) {
+    console.error('Auth error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 }
