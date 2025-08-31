@@ -42,28 +42,52 @@ function handleAuth(req, res) {
     try {
         const { initData } = req.body;
         
+        console.log('Auth request received, initData:', initData ? 'present' : 'missing');
+        
         if (!initData) {
+            console.error('initData is required');
             return res.status(400).json({ error: 'initData is required' });
         }
 
         const isValid = validateTelegramData(initData, TELEGRAM_BOT_TOKEN);
         
         if (!isValid) {
+            console.error('Invalid Telegram data');
             return res.status(401).json({ error: 'Invalid Telegram data' });
         }
 
         const urlParams = new URLSearchParams(initData);
-        const userData = JSON.parse(urlParams.get('user'));
+        const userDataRaw = urlParams.get('user');
         
+        if (!userDataRaw) {
+            console.error('User data not found in initData');
+            return res.status(400).json({ error: 'User data not found' });
+        }
+        
+        let userData;
+        try {
+            userData = JSON.parse(userDataRaw);
+        } catch (parseError) {
+            console.error('Error parsing user data:', parseError);
+            return res.status(400).json({ error: 'Invalid user data format' });
+        }
+        
+        if (!userData.id) {
+            console.error('User ID not found in user data');
+            return res.status(400).json({ error: 'User ID is required' });
+        }
+
         const player = {
             id: userData.id,
-            first_name: userData.first_name,
+            first_name: userData.first_name || '',
             last_name: userData.last_name || '',
             username: userData.username || '',
             language_code: userData.language_code || 'en'
         };
         
         players.set(userData.id.toString(), player);
+        
+        console.log('User authenticated successfully:', userData.id, userData.first_name);
         
         res.json({
             success: true,
@@ -153,7 +177,6 @@ app.post('/lobby/join', (req, res) => {
 
         lobby.players.push(player);
         
-        // Уведомляем всех игроков о новом участнике
         broadcastToLobby(lobbyId, {
             type: 'player_joined',
             player: player,
@@ -185,7 +208,6 @@ app.post('/lobby/:id/leave', (req, res) => {
 
         lobby.players.splice(playerIndex, 1);
         
-        // Уведомляем о выходе игрока
         broadcastToLobby(lobbyId, {
             type: 'player_left',
             userId: userId,
@@ -210,7 +232,6 @@ app.post('/lobby/:id/start', (req, res) => {
             return res.status(404).json({ error: 'Lobby not found' });
         }
 
-        // Проверяем что пользователь - хост лобби
         if (lobby.host.toString() !== userId.toString()) {
             return res.status(403).json({ error: 'Only host can start the game' });
         }
@@ -231,7 +252,6 @@ app.post('/lobby/:id/start', (req, res) => {
             moves: []
         };
 
-        // Уведомляем о начале игры
         broadcastToLobby(lobbyId, {
             type: 'game_started',
             lobby: lobby
@@ -272,7 +292,6 @@ wss.on('connection', (ws, req) => {
     const connectionId = Math.random().toString(36).substr(2, 9);
     connections.set(connectionId, { ws, lobbyId: null, userId: null });
     
-    // Отправляем ping каждые 25 секунд
     const pingInterval = setInterval(() => {
         if (ws.readyState === ws.OPEN) {
             try {
@@ -322,7 +341,6 @@ function handleWebSocketMessage(connectionId, message) {
             handleGameMove(connectionId, message);
             break;
         case 'ping':
-            // Просто отвечаем pong
             if (connection.ws.readyState === connection.ws.OPEN) {
                 connection.ws.send(JSON.stringify({ type: 'pong' }));
             }
@@ -338,7 +356,6 @@ function handleJoinLobby(connectionId, message) {
 
     const { lobbyId, userId, initData } = message;
     
-    // Проверяем авторизацию
     if (!validateTelegramData(initData, TELEGRAM_BOT_TOKEN)) {
         connection.ws.send(JSON.stringify({ 
             type: 'error', 
@@ -356,7 +373,6 @@ function handleJoinLobby(connectionId, message) {
         return;
     }
 
-    // Проверяем что пользователь в лобби
     const playerInLobby = lobby.players.some(p => p.id.toString() === userId.toString());
     if (!playerInLobby) {
         connection.ws.send(JSON.stringify({ 
@@ -387,7 +403,6 @@ function handleGameMove(connectionId, message) {
     const { move } = message;
     const { x, y, z, symbol } = move;
 
-    // Проверяем что ход делает текущий игрок
     if (connection.userId !== lobby.gameState.currentPlayer) {
         connection.ws.send(JSON.stringify({
             type: 'error',
@@ -396,7 +411,6 @@ function handleGameMove(connectionId, message) {
         return;
     }
 
-    // Проверяем что символ совпадает
     const player = lobby.gameState.players.find(p => p.id === connection.userId);
     if (!player || player.symbol !== symbol) {
         connection.ws.send(JSON.stringify({
@@ -406,7 +420,6 @@ function handleGameMove(connectionId, message) {
         return;
     }
 
-    // Проверяем что клетка свободна
     const index = (x + 1) * 9 + (y + 1) * 3 + (z + 1);
     if (lobby.gameState.board[index] !== null) {
         connection.ws.send(JSON.stringify({
@@ -416,11 +429,9 @@ function handleGameMove(connectionId, message) {
         return;
     }
 
-    // Делаем ход
     lobby.gameState.board[index] = symbol;
     lobby.gameState.moves.push({ x, y, z, symbol, player: connection.userId });
 
-    // Проверяем победу
     const winner = checkWin(lobby.gameState.board, symbol);
     if (winner) {
         lobby.status = 'finished';
@@ -435,7 +446,6 @@ function handleGameMove(connectionId, message) {
         return;
     }
 
-    // Проверяем ничью
     if (lobby.gameState.board.every(cell => cell !== null)) {
         lobby.status = 'finished';
         lobby.gameState.winner = 'draw';
@@ -449,12 +459,10 @@ function handleGameMove(connectionId, message) {
         return;
     }
 
-    // Передаем ход следующему игроку
     const currentPlayerIndex = lobby.gameState.players.findIndex(p => p.id === lobby.gameState.currentPlayer);
     const nextPlayerIndex = (currentPlayerIndex + 1) % lobby.gameState.players.length;
     lobby.gameState.currentPlayer = lobby.gameState.players[nextPlayerIndex].id;
 
-    // Отправляем обновление игры
     broadcastToLobby(connection.lobbyId, {
         type: 'game_update',
         gameState: lobby.gameState,
@@ -463,11 +471,7 @@ function handleGameMove(connectionId, message) {
 }
 
 function checkWin(board, symbol) {
-    // Проверяем все возможные выигрышные комбинации в 3D сетке 3x3x3
-    
-    // Проверка по слоям (горизонтальные и вертикальные линии в каждом слое)
     for (let z = 0; z < 3; z++) {
-        // Горизонтальные линии
         for (let y = 0; y < 3; y++) {
             if (board[z*9 + y*3] === symbol && 
                 board[z*9 + y*3 + 1] === symbol && 
@@ -476,7 +480,6 @@ function checkWin(board, symbol) {
             }
         }
         
-        // Вертикальные линии
         for (let x = 0; x < 3; x++) {
             if (board[z*9 + x] === symbol && 
                 board[z*9 + x + 3] === symbol && 
@@ -485,7 +488,6 @@ function checkWin(board, symbol) {
             }
         }
         
-        // Диагонали в слое
         if (board[z*9] === symbol && board[z*9 + 4] === symbol && board[z*9 + 8] === symbol) {
             return symbol;
         }
@@ -494,7 +496,6 @@ function checkWin(board, symbol) {
         }
     }
     
-    // Проверка вертикально через слои
     for (let x = 0; x < 3; x++) {
         for (let y = 0; y < 3; y++) {
             if (board[x + y*3] === symbol && 
@@ -505,7 +506,6 @@ function checkWin(board, symbol) {
         }
     }
     
-    // Проверка 3D диагоналей
     if (board[0] === symbol && board[13] === symbol && board[26] === symbol) {
         return symbol;
     }
@@ -544,7 +544,6 @@ function cleanupEmptyLobbies() {
     let removedCount = 0;
     
     lobbies.forEach((lobby, lobbyId) => {
-        // Удаляем лобби которые пустые или старше 1 часа
         if (lobby.players.length === 0 || (now - lobby.createdAt > 60 * 60 * 1000)) {
             lobbies.delete(lobbyId);
             removedCount++;
@@ -569,7 +568,6 @@ app.get('/health', (req, res) => {
     res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
-// Обработка ошибок
 app.use((error, req, res, next) => {
     console.error('Unhandled error:', error);
     res.status(500).json({ error: 'Internal server error' });
