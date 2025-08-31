@@ -265,10 +265,16 @@ const server = app.listen(PORT, () => {
 const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws, req) => {
+    console.log('New WebSocket connection');
     const connectionId = Math.random().toString(36).substr(2, 9);
     connections.set(connectionId, { ws, lobbyId: null, userId: null });
     
-    // Отправляем ping каждые 25 секунд
+    // Отправляем приветственное сообщение
+    ws.send(JSON.stringify({ 
+        type: 'connected',
+        message: 'WebSocket connection established'
+    }));
+
     const pingInterval = setInterval(() => {
         if (ws.readyState === ws.OPEN) {
             try {
