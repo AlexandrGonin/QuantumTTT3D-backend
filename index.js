@@ -16,9 +16,12 @@ if (!TELEGRAM_BOT_TOKEN) {
 const lobbies = new Map();
 const players = new Map();
 const connections = new Map();
+const gameUpdates = new Map(); // Для HTTP long-polling
 
 // Очистка пустых лобби каждые 5 минут
 setInterval(cleanupEmptyLobbies, 5 * 60 * 1000);
+// Очистка старых gameUpdates каждые 10 минут
+setInterval(cleanupOldGameUpdates, 10 * 60 * 1000);
 
 app.use(cors({ origin: true }));
 app.use(express.json());
@@ -150,11 +153,12 @@ app.post('/lobby/join', (req, res) => {
 
         lobby.players.push(player);
         
-        // Уведомляем всех игроков о новом участнике
-        broadcastToLobby(lobbyId, {
+        // Добавляем обновление о новом игроке
+        addGameUpdate(lobbyId, {
             type: 'player_joined',
             player: player,
-            lobby: lobby
+            lobby: lobby,
+            timestamp: Date.now()
         });
 
         res.json({ success: true, lobby: lobby });
@@ -182,11 +186,12 @@ app.post('/lobby/:id/leave', (req, res) => {
 
         lobby.players.splice(playerIndex, 1);
         
-        // Уведомляем о выходе игрока
-        broadcastToLobby(lobbyId, {
+        // Добавляем обновление о выходе игрока
+        addGameUpdate(lobbyId, {
             type: 'player_left',
             userId: userId,
-            lobby: lobby
+            lobby: lobby,
+            timestamp: Date.now()
         });
 
         res.json({ success: true, lobby: lobby });
@@ -228,10 +233,11 @@ app.post('/lobby/:id/start', (req, res) => {
             moves: []
         };
 
-        // Уведомляем о начале игры
-        broadcastToLobby(lobbyId, {
+        // Добавляем обновление о начале игры
+        addGameUpdate(lobbyId, {
             type: 'game_started',
-            lobby: lobby
+            lobby: lobby,
+            timestamp: Date.now()
         });
 
         res.json({ success: true, lobby: lobby });
@@ -257,245 +263,126 @@ app.get('/lobby/:id', (req, res) => {
     }
 });
 
-// ==================== WEB SOCKET ====================
-const server = app.listen(PORT, () => {
-    console.log('Server running on port', PORT);
-});
-
-const wss = new WebSocketServer({ 
-    server,
-    perMessageDeflate: {
-        zlibDeflateOptions: {
-            chunkSize: 1024,
-            memLevel: 7,
-            level: 3
-        },
-        zlibInflateOptions: {
-            chunkSize: 10 * 1024
-        },
-        clientNoContextTakeover: true,
-        serverNoContextTakeover: true,
-        serverMaxWindowBits: 10,
-        concurrencyLimit: 10,
-        threshold: 1024
-    }
-});
-
-// Храним активные ping интервалы
-const pingIntervals = new Map();
-
-wss.on('connection', (ws, req) => {
-    console.log('New WebSocket connection from:', req.socket.remoteAddress);
-    
-    const connectionId = Math.random().toString(36).substr(2, 9);
-    connections.set(connectionId, { 
-        ws, 
-        lobbyId: null, 
-        userId: null,
-        isAlive: true 
-    });
-
-    // Устанавливаем обработчик pong для проверки активности
-    ws.on('pong', () => {
-        const conn = connections.get(connectionId);
-        if (conn) {
-            conn.isAlive = true;
-        }
-    });
-
-    // Отправляем сразу при подключении
-    ws.send(JSON.stringify({ 
-        type: 'connected',
-        message: 'WebSocket connection established',
-        connectionId: connectionId
-    }));
-
-    // Настраиваем интервал проверки активности
-    const interval = setInterval(() => {
-        const conn = connections.get(connectionId);
-        if (!conn) {
-            clearInterval(interval);
-            return;
-        }
-
-        if (conn.isAlive === false) {
-            console.log('Connection terminated due to inactivity:', connectionId);
-            conn.ws.terminate();
-            connections.delete(connectionId);
-            clearInterval(interval);
-            return;
-        }
-
-        conn.isAlive = false;
-        conn.ws.ping();
-    }, 30000);
-
-    pingIntervals.set(connectionId, interval);
-
-    ws.on('message', (data) => {
-        try {
-            const message = JSON.parse(data);
-            console.log('WebSocket message received:', message.type);
-            handleWebSocketMessage(connectionId, message);
-        } catch (error) {
-            console.error('WebSocket message error:', error);
-            ws.send(JSON.stringify({ 
-                type: 'error', 
-                message: 'Invalid message format' 
-            }));
-        }
-    });
-
-    ws.on('close', (code, reason) => {
-        console.log('WebSocket connection closed:', connectionId, 'Code:', code, 'Reason:', reason.toString());
-        const interval = pingIntervals.get(connectionId);
-        if (interval) {
-            clearInterval(interval);
-            pingIntervals.delete(connectionId);
-        }
-        connections.delete(connectionId);
-    });
-
-    ws.on('error', (error) => {
-        console.error('WebSocket error:', connectionId, error);
-        const interval = pingIntervals.get(connectionId);
-        if (interval) {
-            clearInterval(interval);
-            pingIntervals.delete(connectionId);
-        }
-        connections.delete(connectionId);
-    });
-});
-
-function handleWebSocketMessage(connectionId, message) {
-    const connection = connections.get(connectionId);
-    if (!connection || !connection.ws || connection.ws.readyState !== connection.ws.OPEN) {
-        return;
-    }
-
+// ==================== HTTP LONG-POLLING ДЛЯ ИГРЫ ====================
+app.post('/game/poll', (req, res) => {
     try {
-        switch (message.type) {
-            case 'join_lobby':
-                handleJoinLobby(connectionId, message);
-                break;
-            case 'game_move':
-                handleGameMove(connectionId, message);
-                break;
-            case 'ping':
-                // Отвечаем на ping
-                connection.ws.send(JSON.stringify({ type: 'pong' }));
-                break;
-            case 'heartbeat':
-                // Подтверждаем heartbeat
-                connection.ws.send(JSON.stringify({ type: 'heartbeat_ack' }));
-                break;
-            default:
-                console.log('Unknown message type:', message.type);
+        const { lobbyId, userId, lastUpdate = 0 } = req.body;
+        
+        if (!lobbyId || !userId) {
+            return res.status(400).json({ error: 'lobbyId and userId are required' });
         }
+
+        const lobby = lobbies.get(lobbyId);
+        if (!lobby) {
+            return res.status(404).json({ error: 'Lobby not found' });
+        }
+
+        // Проверяем что пользователь в лобби
+        const playerInLobby = lobby.players.some(p => p.id.toString() === userId.toString());
+        if (!playerInLobby) {
+            return res.status(403).json({ error: 'Player not in lobby' });
+        }
+
+        // Получаем обновления после lastUpdate
+        const updates = gameUpdates.get(lobbyId) || [];
+        const newUpdates = updates.filter(update => update.timestamp > lastUpdate);
+        
+        res.json({
+            success: true,
+            updates: newUpdates,
+            timestamp: Date.now()
+        });
+
     } catch (error) {
-        console.error('Error handling WebSocket message:', error);
-        connection.ws.send(JSON.stringify({ 
-            type: 'error', 
-            message: 'Internal server error' 
-        }));
+        console.error('Poll error:', error);
+        res.status(500).json({ error: 'Internal server error' });
     }
-}
+});
 
-function handleJoinLobby(connectionId, message) {
-    const connection = connections.get(connectionId);
-    if (!connection) return;
+app.post('/game/send', (req, res) => {
+    try {
+        const { lobbyId, userId, message } = req.body;
+        
+        if (!lobbyId || !userId || !message) {
+            return res.status(400).json({ error: 'lobbyId, userId and message are required' });
+        }
 
-    const { lobbyId, userId, initData } = message;
-    
-    // Проверяем авторизацию
-    if (!validateTelegramData(initData, TELEGRAM_BOT_TOKEN)) {
-        connection.ws.send(JSON.stringify({ 
-            type: 'error', 
-            message: 'Invalid authentication' 
-        }));
-        return;
+        const lobby = lobbies.get(lobbyId);
+        if (!lobby) {
+            return res.status(404).json({ error: 'Lobby not found' });
+        }
+
+        // Проверяем что пользователь в лобби
+        const playerInLobby = lobby.players.some(p => p.id.toString() === userId.toString());
+        if (!playerInLobby) {
+            return res.status(403).json({ error: 'Player not in lobby' });
+        }
+
+        // Обрабатываем不同类型的 сообщения
+        if (message.type === 'game_move') {
+            handleGameMove(lobbyId, userId, message);
+        } else {
+            // Для других типов сообщений просто добавляем в обновления
+            addGameUpdate(lobbyId, {
+                ...message,
+                userId: userId,
+                timestamp: Date.now()
+            });
+        }
+
+        res.json({ success: true });
+
+    } catch (error) {
+        console.error('Send error:', error);
+        res.status(500).json({ error: 'Internal server error' });
     }
+});
 
+function handleGameMove(lobbyId, userId, message) {
     const lobby = lobbies.get(lobbyId);
-    if (!lobby) {
-        connection.ws.send(JSON.stringify({ 
-            type: 'error', 
-            message: 'Lobby not found' 
-        }));
-        return;
-    }
-
-    // Проверяем что пользователь в лобби
-    const playerInLobby = lobby.players.some(p => p.id.toString() === userId.toString());
-    if (!playerInLobby) {
-        connection.ws.send(JSON.stringify({ 
-            type: 'error', 
-            message: 'Player not in lobby' 
-        }));
-        return;
-    }
-
-    connection.lobbyId = lobbyId;
-    connection.userId = userId;
-
-    console.log(`User ${userId} joined lobby ${lobbyId} via WebSocket`);
-    
-    connection.ws.send(JSON.stringify({ 
-        type: 'lobby_joined', 
-        lobby: lobby,
-        success: true
-    }));
-
-    // Уведомляем других игроков
-    broadcastToLobby(lobbyId, {
-        type: 'player_connected',
-        userId: userId,
-        lobby: lobby
-    });
-}
-
-function handleGameMove(connectionId, message) {
-    const connection = connections.get(connectionId);
-    if (!connection || !connection.lobbyId) return;
-
-    const lobby = lobbies.get(connection.lobbyId);
     if (!lobby || lobby.status !== 'playing') return;
 
     const { move } = message;
     const { x, y, z, symbol } = move;
 
     // Проверяем что ход делает текущий игрок
-    if (connection.userId !== lobby.gameState.currentPlayer) {
-        connection.ws.send(JSON.stringify({
+    if (userId !== lobby.gameState.currentPlayer) {
+        addGameUpdate(lobbyId, {
             type: 'error',
-            message: 'Not your turn'
-        }));
+            message: 'Not your turn',
+            userId: userId,
+            timestamp: Date.now()
+        });
         return;
     }
 
     // Проверяем что символ совпадает
-    const player = lobby.gameState.players.find(p => p.id === connection.userId);
+    const player = lobby.gameState.players.find(p => p.id.toString() === userId.toString());
     if (!player || player.symbol !== symbol) {
-        connection.ws.send(JSON.stringify({
+        addGameUpdate(lobbyId, {
             type: 'error',
-            message: 'Invalid symbol'
-        }));
+            message: 'Invalid symbol',
+            userId: userId,
+            timestamp: Date.now()
+        });
         return;
     }
 
     // Проверяем что клетка свободна
     const index = (x + 1) * 9 + (y + 1) * 3 + (z + 1);
     if (lobby.gameState.board[index] !== null) {
-        connection.ws.send(JSON.stringify({
+        addGameUpdate(lobbyId, {
             type: 'error',
-            message: 'Cell already occupied'
-        }));
+            message: 'Cell already occupied',
+            userId: userId,
+            timestamp: Date.now()
+        });
         return;
     }
 
     // Делаем ход
     lobby.gameState.board[index] = symbol;
-    lobby.gameState.moves.push({ x, y, z, symbol, player: connection.userId });
+    lobby.gameState.moves.push({ x, y, z, symbol, player: userId });
 
     // Проверяем победу
     const winner = checkWin(lobby.gameState.board, symbol);
@@ -503,10 +390,11 @@ function handleGameMove(connectionId, message) {
         lobby.status = 'finished';
         lobby.gameState.winner = winner;
         
-        broadcastToLobby(connection.lobbyId, {
+        addGameUpdate(lobbyId, {
             type: 'game_ended',
             lobby: lobby,
-            winner: winner
+            winner: winner,
+            timestamp: Date.now()
         });
         
         return;
@@ -517,26 +405,107 @@ function handleGameMove(connectionId, message) {
         lobby.status = 'finished';
         lobby.gameState.winner = 'draw';
         
-        broadcastToLobby(connection.lobbyId, {
+        addGameUpdate(lobbyId, {
             type: 'game_ended',
             lobby: lobby,
-            winner: 'draw'
+            winner: 'draw',
+            timestamp: Date.now()
         });
         
         return;
     }
 
     // Передаем ход следующему игроку
-    const currentPlayerIndex = lobby.gameState.players.findIndex(p => p.id === lobby.gameState.currentPlayer);
+    const currentPlayerIndex = lobby.gameState.players.findIndex(p => p.id.toString() === lobby.gameState.currentPlayer.toString());
     const nextPlayerIndex = (currentPlayerIndex + 1) % lobby.gameState.players.length;
     lobby.gameState.currentPlayer = lobby.gameState.players[nextPlayerIndex].id;
 
-    // Отправляем обновление игры
-    broadcastToLobby(connection.lobbyId, {
+    // Добавляем обновление игры
+    addGameUpdate(lobbyId, {
         type: 'game_update',
         gameState: lobby.gameState,
-        move: move
+        move: move,
+        timestamp: Date.now()
     });
+}
+
+// ==================== WEB SOCKET (Оставлено для обратной совместимости) ====================
+const server = app.listen(PORT, () => {
+    console.log('Server running on port', PORT);
+    console.log('HTTP long-polling available at:', API_BASE_URL);
+});
+
+const wss = new WebSocketServer({ server });
+
+wss.on('connection', (ws, req) => {
+    console.log('WebSocket connection attempted - using HTTP long-polling instead');
+    
+    // Закрываем WebSocket соединение и сообщаем о использовании HTTP
+    ws.send(JSON.stringify({
+        type: 'error',
+        message: 'WebSocket not supported. Please use HTTP long-polling.',
+        timestamp: Date.now()
+    }));
+    
+    ws.close(1000, 'Use HTTP long-polling');
+});
+
+// ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+function addGameUpdate(lobbyId, update) {
+    if (!gameUpdates.has(lobbyId)) {
+        gameUpdates.set(lobbyId, []);
+    }
+    
+    const updates = gameUpdates.get(lobbyId);
+    updates.push(update);
+    
+    // Ограничиваем количество хранимых обновлений
+    if (updates.length > 100) {
+        gameUpdates.set(lobbyId, updates.slice(-50));
+    }
+}
+
+function generateLobbyId() {
+    return Math.random().toString(36).substr(2, 8).toUpperCase();
+}
+
+function cleanupEmptyLobbies() {
+    const now = Date.now();
+    let removedCount = 0;
+    
+    lobbies.forEach((lobby, lobbyId) => {
+        if (lobby.players.length === 0 || (now - lobby.createdAt > 60 * 60 * 1000)) {
+            lobbies.delete(lobbyId);
+            gameUpdates.delete(lobbyId);
+            removedCount++;
+        }
+    });
+    
+    if (removedCount > 0) {
+        console.log(`Cleaned up ${removedCount} empty lobbies`);
+    }
+}
+
+function cleanupOldGameUpdates() {
+    const now = Date.now();
+    let cleanedCount = 0;
+    
+    gameUpdates.forEach((updates, lobbyId) => {
+        // Удаляем обновления старше 1 часа
+        const freshUpdates = updates.filter(update => now - update.timestamp < 60 * 60 * 1000);
+        
+        if (freshUpdates.length === 0) {
+            gameUpdates.delete(lobbyId);
+            cleanedCount++;
+        } else if (freshUpdates.length < updates.length) {
+            gameUpdates.set(lobbyId, freshUpdates);
+            cleanedCount++;
+        }
+    });
+    
+    if (cleanedCount > 0) {
+        console.log(`Cleaned up old game updates from ${cleanedCount} lobbies`);
+    }
 }
 
 function checkWin(board, symbol) {
@@ -591,47 +560,13 @@ function checkWin(board, symbol) {
     return null;
 }
 
-// ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-function generateLobbyId() {
-    return Math.random().toString(36).substr(2, 8).toUpperCase();
-}
-
-function broadcastToLobby(lobbyId, message) {
-    connections.forEach((conn, connId) => {
-        if (conn.lobbyId === lobbyId && conn.ws && conn.ws.readyState === conn.ws.OPEN) {
-            try {
-                conn.ws.send(JSON.stringify(message));
-            } catch (error) {
-                console.error('Broadcast error:', error);
-                connections.delete(connId);
-            }
-        }
-    });
-}
-
-function cleanupEmptyLobbies() {
-    const now = Date.now();
-    let removedCount = 0;
-    
-    lobbies.forEach((lobby, lobbyId) => {
-        if (lobby.players.length === 0 || (now - lobby.createdAt > 60 * 60 * 1000)) {
-            lobbies.delete(lobbyId);
-            removedCount++;
-        }
-    });
-    
-    if (removedCount > 0) {
-        console.log(`Cleaned up ${removedCount} empty lobbies`);
-    }
-}
-
 // ==================== БАЗОВЫЕ ЭНДПОИНТЫ ====================
 app.get('/', (req, res) => {
     res.json({ 
         message: 'Quantum 3D Tic-Tac-Toe Backend is running!',
         lobbiesCount: lobbies.size,
         playersCount: players.size,
-        connectionsCount: connections.size
+        connectionType: 'HTTP long-polling'
     });
 });
 
@@ -642,7 +577,7 @@ app.get('/health', (req, res) => {
         stats: {
             lobbies: lobbies.size,
             players: players.size,
-            connections: connections.size
+            gameUpdates: gameUpdates.size
         }
     });
 });
@@ -650,8 +585,8 @@ app.get('/health', (req, res) => {
 // Очистка при завершении
 process.on('SIGINT', () => {
     console.log('Shutting down gracefully...');
-    wss.close(() => {
-        console.log('WebSocket server closed');
+    server.close(() => {
+        console.log('HTTP server closed');
         process.exit(0);
     });
 });
