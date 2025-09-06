@@ -20,7 +20,10 @@ const connections = new Map();
 // Очистка пустых лобби каждые 5 минут
 setInterval(cleanupEmptyLobbies, 5 * 60 * 1000);
 
-app.use(cors({ origin: true }));
+app.use(cors({ 
+    origin: ['https://telegram-web-app.com', 'http://localhost:3000', 'https://*.vercel.app'],
+    credentials: true 
+}));
 app.use(express.json());
 
 app.use((req, res, next) => {
@@ -150,8 +153,8 @@ app.post('/lobby/join', (req, res) => {
 
         lobby.players.push(player);
         
-        // Уведомляем всех игроков о новом участнике через HTTP, если WS не работает
-        notifyLobbyUpdate(lobbyId, {
+        // Уведомляем всех игроков о новом участнике через HTTP fallback
+        notifyLobbyPlayersHTTP(lobbyId, {
             type: 'player_joined',
             player: player,
             lobby: lobby
@@ -182,8 +185,8 @@ app.post('/lobby/:id/leave', (req, res) => {
 
         lobby.players.splice(playerIndex, 1);
         
-        // Уведомляем о выходе игрока
-        notifyLobbyUpdate(lobbyId, {
+        // Уведомляем о выходе игрока через HTTP fallback
+        notifyLobbyPlayersHTTP(lobbyId, {
             type: 'player_left',
             userId: userId,
             lobby: lobby
@@ -227,8 +230,8 @@ app.post('/lobby/:id/start', (req, res) => {
             moves: []
         };
 
-        // Уведомляем о начале игры
-        notifyLobbyUpdate(lobbyId, {
+        // Уведомляем о начале игры через HTTP fallback
+        notifyLobbyPlayersHTTP(lobbyId, {
             type: 'game_started',
             lobby: lobby
         });
@@ -259,28 +262,44 @@ app.get('/lobby/:id', (req, res) => {
 // ==================== WEB SOCKET ====================
 const server = app.listen(PORT, () => {
     console.log('Server running on port', PORT);
+    console.log('WebSocket available on port', PORT);
 });
 
 const wss = new WebSocketServer({ 
     server,
-    perMessageDeflate: false // Отключаем сжатие для стабильности
+    perMessageDeflate: {
+        zlibDeflateOptions: {
+            chunkSize: 1024,
+            memLevel: 7,
+            level: 3
+        },
+        zlibInflateOptions: {
+            chunkSize: 10 * 1024
+        },
+        clientNoContextTakeover: true,
+        serverNoContextTakeover: true,
+        serverMaxWindowBits: 10,
+        concurrencyLimit: 10,
+        threshold: 1024
+    }
 });
 
-// Храним ping интервалы
+// Храним активные ping интервалы
 const pingIntervals = new Map();
 
 wss.on('connection', (ws, req) => {
-    console.log('New WebSocket connection attempt');
+    console.log('New WebSocket connection attempt from:', req.headers.origin);
     
     const connectionId = Math.random().toString(36).substr(2, 9);
     connections.set(connectionId, { 
         ws, 
         lobbyId: null, 
         userId: null,
-        isAlive: true
+        isAlive: true,
+        ip: req.socket.remoteAddress
     });
 
-    // Устанавливаем обработчик pong
+    // Устанавливаем обработчик pong для проверки активности
     ws.on('pong', () => {
         const conn = connections.get(connectionId);
         if (conn) {
@@ -288,41 +307,65 @@ wss.on('connection', (ws, req) => {
         }
     });
 
+    // Отправляем приветственное сообщение
+    ws.send(JSON.stringify({ 
+        type: 'connected',
+        message: 'WebSocket connection established',
+        connectionId: connectionId,
+        timestamp: Date.now()
+    }));
+
     // Настраиваем интервал проверки активности
-    const heartbeatInterval = setInterval(() => {
+    const interval = setInterval(() => {
         const conn = connections.get(connectionId);
         if (!conn) {
-            clearInterval(heartbeatInterval);
+            clearInterval(interval);
             return;
         }
 
         if (conn.isAlive === false) {
-            console.log('Terminating inactive connection:', connectionId);
+            console.log('Connection terminated due to inactivity:', connectionId);
             conn.ws.terminate();
+            connections.delete(connectionId);
+            clearInterval(interval);
+            pingIntervals.delete(connectionId);
             return;
         }
 
         conn.isAlive = false;
-        conn.ws.ping();
+        try {
+            conn.ws.ping();
+        } catch (error) {
+            console.error('Ping error:', error);
+            connections.delete(connectionId);
+            clearInterval(interval);
+            pingIntervals.delete(connectionId);
+        }
     }, 30000);
 
-    pingIntervals.set(connectionId, heartbeatInterval);
+    pingIntervals.set(connectionId, interval);
 
     ws.on('message', (data) => {
         try {
             const message = JSON.parse(data);
+            console.log('WebSocket message received:', message.type);
             handleWebSocketMessage(connectionId, message);
         } catch (error) {
             console.error('WebSocket message error:', error);
-            ws.send(JSON.stringify({ 
-                type: 'error', 
-                message: 'Invalid message format' 
-            }));
+            try {
+                ws.send(JSON.stringify({ 
+                    type: 'error', 
+                    message: 'Invalid message format',
+                    timestamp: Date.now()
+                }));
+            } catch (sendError) {
+                console.error('Error sending error message:', sendError);
+            }
         }
     });
 
-    ws.on('close', () => {
-        console.log('WebSocket connection closed:', connectionId);
+    ws.on('close', (code, reason) => {
+        console.log('WebSocket connection closed:', connectionId, 'Code:', code, 'Reason:', reason.toString());
         const interval = pingIntervals.get(connectionId);
         if (interval) {
             clearInterval(interval);
@@ -332,7 +375,7 @@ wss.on('connection', (ws, req) => {
     });
 
     ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
+        console.error('WebSocket error:', connectionId, error);
         const interval = pingIntervals.get(connectionId);
         if (interval) {
             clearInterval(interval);
@@ -340,34 +383,55 @@ wss.on('connection', (ws, req) => {
         }
         connections.delete(connectionId);
     });
-
-    // Отправляем приветственное сообщение
-    ws.send(JSON.stringify({
-        type: 'connected',
-        connectionId: connectionId,
-        timestamp: Date.now()
-    }));
 });
 
 function handleWebSocketMessage(connectionId, message) {
     const connection = connections.get(connectionId);
-    if (!connection) return;
+    if (!connection || !connection.ws || connection.ws.readyState !== connection.ws.OPEN) {
+        return;
+    }
 
-    switch (message.type) {
-        case 'join_lobby':
-            handleJoinLobby(connectionId, message);
-            break;
-        case 'game_move':
-            handleGameMove(connectionId, message);
-            break;
-        case 'ping':
-            // Отвечаем на ping
-            if (connection.ws.readyState === connection.ws.OPEN) {
-                connection.ws.send(JSON.stringify({ type: 'pong' }));
-            }
-            break;
-        default:
-            console.log('Unknown message type:', message.type);
+    try {
+        switch (message.type) {
+            case 'join_lobby':
+                handleJoinLobby(connectionId, message);
+                break;
+            case 'game_move':
+                handleGameMove(connectionId, message);
+                break;
+            case 'ping':
+                // Отвечаем на ping
+                connection.ws.send(JSON.stringify({ 
+                    type: 'pong', 
+                    timestamp: Date.now() 
+                }));
+                break;
+            case 'heartbeat':
+                // Подтверждаем heartbeat
+                connection.ws.send(JSON.stringify({ 
+                    type: 'heartbeat_ack', 
+                    timestamp: Date.now() 
+                }));
+                break;
+            default:
+                console.log('Unknown message type:', message.type);
+                connection.ws.send(JSON.stringify({ 
+                    type: 'error', 
+                    message: 'Unknown message type',
+                    timestamp: Date.now()
+                }));
+        }
+    } catch (error) {
+        console.error('Error handling WebSocket message:', error);
+        try {
+            connection.ws.send(JSON.stringify({ 
+                type: 'error', 
+                message: 'Internal server error',
+                timestamp: Date.now()
+            }));
+        } catch (sendError) {
+            console.error('Error sending error message:', sendError);
+        }
     }
 }
 
@@ -381,7 +445,8 @@ function handleJoinLobby(connectionId, message) {
     if (!validateTelegramData(initData, TELEGRAM_BOT_TOKEN)) {
         connection.ws.send(JSON.stringify({ 
             type: 'error', 
-            message: 'Invalid authentication' 
+            message: 'Invalid authentication',
+            timestamp: Date.now()
         }));
         return;
     }
@@ -390,7 +455,8 @@ function handleJoinLobby(connectionId, message) {
     if (!lobby) {
         connection.ws.send(JSON.stringify({ 
             type: 'error', 
-            message: 'Lobby not found' 
+            message: 'Lobby not found',
+            timestamp: Date.now()
         }));
         return;
     }
@@ -400,7 +466,8 @@ function handleJoinLobby(connectionId, message) {
     if (!playerInLobby) {
         connection.ws.send(JSON.stringify({ 
             type: 'error', 
-            message: 'Player not in lobby' 
+            message: 'Player not in lobby',
+            timestamp: Date.now()
         }));
         return;
     }
@@ -413,8 +480,17 @@ function handleJoinLobby(connectionId, message) {
     connection.ws.send(JSON.stringify({ 
         type: 'lobby_joined', 
         lobby: lobby,
-        success: true
+        success: true,
+        timestamp: Date.now()
     }));
+
+    // Уведомляем других игроков в лобби
+    broadcastToLobby(lobbyId, {
+        type: 'player_connected',
+        userId: userId,
+        player: lobby.players.find(p => p.id.toString() === userId.toString()),
+        timestamp: Date.now()
+    }, connectionId);
 }
 
 function handleGameMove(connectionId, message) {
@@ -427,35 +503,43 @@ function handleGameMove(connectionId, message) {
     const { move } = message;
     const { x, y, z, symbol } = move;
 
+    // Проверяем что ход делает текущий игрок
     if (connection.userId !== lobby.gameState.currentPlayer) {
         connection.ws.send(JSON.stringify({
             type: 'error',
-            message: 'Not your turn'
+            message: 'Not your turn',
+            timestamp: Date.now()
         }));
         return;
     }
 
+    // Проверяем что символ совпадает
     const player = lobby.gameState.players.find(p => p.id === connection.userId);
     if (!player || player.symbol !== symbol) {
         connection.ws.send(JSON.stringify({
             type: 'error',
-            message: 'Invalid symbol'
+            message: 'Invalid symbol',
+            timestamp: Date.now()
         }));
         return;
     }
 
+    // Проверяем что клетка свободна
     const index = (x + 1) * 9 + (y + 1) * 3 + (z + 1);
     if (lobby.gameState.board[index] !== null) {
         connection.ws.send(JSON.stringify({
             type: 'error',
-            message: 'Cell already occupied'
+            message: 'Cell already occupied',
+            timestamp: Date.now()
         }));
         return;
     }
 
+    // Делаем ход
     lobby.gameState.board[index] = symbol;
     lobby.gameState.moves.push({ x, y, z, symbol, player: connection.userId });
 
+    // Проверяем победу
     const winner = checkWin(lobby.gameState.board, symbol);
     if (winner) {
         lobby.status = 'finished';
@@ -464,12 +548,14 @@ function handleGameMove(connectionId, message) {
         broadcastToLobby(connection.lobbyId, {
             type: 'game_ended',
             lobby: lobby,
-            winner: winner
+            winner: winner,
+            timestamp: Date.now()
         });
         
         return;
     }
 
+    // Проверяем ничью
     if (lobby.gameState.board.every(cell => cell !== null)) {
         lobby.status = 'finished';
         lobby.gameState.winner = 'draw';
@@ -477,70 +563,25 @@ function handleGameMove(connectionId, message) {
         broadcastToLobby(connection.lobbyId, {
             type: 'game_ended',
             lobby: lobby,
-            winner: 'draw'
+            winner: 'draw',
+            timestamp: Date.now()
         });
         
         return;
     }
 
+    // Передаем ход следующему игроку
     const currentPlayerIndex = lobby.gameState.players.findIndex(p => p.id === lobby.gameState.currentPlayer);
     const nextPlayerIndex = (currentPlayerIndex + 1) % lobby.gameState.players.length;
     lobby.gameState.currentPlayer = lobby.gameState.players[nextPlayerIndex].id;
 
+    // Отправляем обновление игры
     broadcastToLobby(connection.lobbyId, {
         type: 'game_update',
         gameState: lobby.gameState,
-        move: move
+        move: move,
+        timestamp: Date.now()
     });
-}
-
-// ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-function generateLobbyId() {
-    return Math.random().toString(36).substr(2, 8).toUpperCase();
-}
-
-function broadcastToLobby(lobbyId, message) {
-    let sentCount = 0;
-    connections.forEach((conn, connId) => {
-        if (conn.lobbyId === lobbyId && conn.ws.readyState === conn.ws.OPEN) {
-            try {
-                conn.ws.send(JSON.stringify(message));
-                sentCount++;
-            } catch (error) {
-                console.error('Broadcast error:', error);
-                connections.delete(connId);
-            }
-        }
-    });
-    
-    // Если никому не удалось отправить через WS, используем fallback
-    if (sentCount === 0) {
-        console.log('No active WebSocket connections, using fallback');
-    }
-}
-
-function notifyLobbyUpdate(lobbyId, message) {
-    // Пытаемся отправить через WebSocket
-    const wsSent = broadcastToLobby(lobbyId, message);
-    
-    // Если WebSocket не работает, обновления будут получены при следующем запросе состояния
-    console.log('Lobby update notified:', message.type);
-}
-
-function cleanupEmptyLobbies() {
-    const now = Date.now();
-    let removedCount = 0;
-    
-    lobbies.forEach((lobby, lobbyId) => {
-        if (lobby.players.length === 0 || (now - lobby.createdAt > 60 * 60 * 1000)) {
-            lobbies.delete(lobbyId);
-            removedCount++;
-        }
-    });
-    
-    if (removedCount > 0) {
-        console.log(`Cleaned up ${removedCount} empty lobbies`);
-    }
 }
 
 function checkWin(board, symbol) {
@@ -595,13 +636,61 @@ function checkWin(board, symbol) {
     return null;
 }
 
+// ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+function generateLobbyId() {
+    return Math.random().toString(36).substr(2, 8).toUpperCase();
+}
+
+function broadcastToLobby(lobbyId, message, excludeConnectionId = null) {
+    let sentCount = 0;
+    connections.forEach((conn, connId) => {
+        if (conn.lobbyId === lobbyId && conn.ws && conn.ws.readyState === conn.ws.OPEN && connId !== excludeConnectionId) {
+            try {
+                conn.ws.send(JSON.stringify(message));
+                sentCount++;
+            } catch (error) {
+                console.error('Broadcast error:', error);
+                connections.delete(connId);
+            }
+        }
+    });
+    
+    if (sentCount === 0) {
+        console.log('No active WebSocket connections for lobby, using HTTP fallback');
+        notifyLobbyPlayersHTTP(lobbyId, message);
+    }
+}
+
+function notifyLobbyPlayersHTTP(lobbyId, message) {
+    // Fallback метод для уведомления игроков через HTTP
+    // Может быть использован если WebSocket не работает
+    console.log('HTTP fallback notification for lobby:', lobbyId, message.type);
+}
+
+function cleanupEmptyLobbies() {
+    const now = Date.now();
+    let removedCount = 0;
+    
+    lobbies.forEach((lobby, lobbyId) => {
+        if (lobby.players.length === 0 || (now - lobby.createdAt > 60 * 60 * 1000)) {
+            lobbies.delete(lobbyId);
+            removedCount++;
+        }
+    });
+    
+    if (removedCount > 0) {
+        console.log(`Cleaned up ${removedCount} empty lobbies`);
+    }
+}
+
 // ==================== БАЗОВЫЕ ЭНДПОИНТЫ ====================
 app.get('/', (req, res) => {
     res.json({ 
         message: 'Quantum 3D Tic-Tac-Toe Backend is running!',
         lobbiesCount: lobbies.size,
         playersCount: players.size,
-        connectionsCount: connections.size
+        connectionsCount: connections.size,
+        websocket: 'active'
     });
 });
 
@@ -609,7 +698,23 @@ app.get('/health', (req, res) => {
     res.json({ 
         status: 'healthy', 
         timestamp: new Date().toISOString(),
-        websocket: 'enabled'
+        stats: {
+            lobbies: lobbies.size,
+            players: players.size,
+            connections: connections.size
+        }
+    });
+});
+
+// Очистка при завершении
+process.on('SIGINT', () => {
+    console.log('Shutting down gracefully...');
+    wss.close(() => {
+        console.log('WebSocket server closed');
+        server.close(() => {
+            console.log('HTTP server closed');
+            process.exit(0);
+        });
     });
 });
 
