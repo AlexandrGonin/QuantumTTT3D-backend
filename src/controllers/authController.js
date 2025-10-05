@@ -1,3 +1,4 @@
+// src/controllers/authController.js
 const express = require('express');
 const { validateTelegramData } = require('../utils/validation');
 const router = express.Router();
